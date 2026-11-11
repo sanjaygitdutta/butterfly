@@ -122,13 +122,48 @@ function selectStrike(strike) {
   }
 }
 
+let wsRetryCount = 0;
+let httpPollingInterval = null;
+
+function startHttpPolling() {
+  if (httpPollingInterval) return;
+  console.log("WebSocket unavailable, falling back to HTTP polling...");
+  const poll = async () => {
+    try {
+      const res = await fetch("/api/matrix-state");
+      if (res.ok) {
+        const data = await res.json();
+        lastData = data;
+        updateDashboard(data);
+      }
+    } catch (e) {
+      console.warn("Polling error:", e);
+    }
+  };
+  poll();
+  httpPollingInterval = setInterval(poll, 1000);
+}
+
 function connectWebSocket() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  try {
+    ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  } catch (e) {
+    startHttpPolling();
+    return;
+  }
 
   ws.onopen = () => {
-    document.getElementById("ws-status").textContent = "Connected (Live)";
-    document.getElementById("ws-status").style.color = "#10b981";
+    wsRetryCount = 0;
+    if (httpPollingInterval) {
+      clearInterval(httpPollingInterval);
+      httpPollingInterval = null;
+    }
+    const st = document.getElementById("ws-status");
+    if (st) {
+      st.textContent = "Connected (Live)";
+      st.style.color = "#10b981";
+    }
   };
 
   ws.onmessage = (event) => {
@@ -138,13 +173,15 @@ function connectWebSocket() {
   };
 
   ws.onclose = () => {
-    document.getElementById("ws-status").textContent = "Disconnected (Reconnecting...)";
-    document.getElementById("ws-status").style.color = "#f43f5e";
-    setTimeout(connectWebSocket, 1500);
+    wsRetryCount++;
+    if (wsRetryCount >= 2) {
+      startHttpPolling();
+    } else {
+      setTimeout(connectWebSocket, 1500);
+    }
   };
 
-  ws.onerror = (err) => {
-    console.error("WebSocket error:", err);
+  ws.onerror = () => {
     ws.close();
   };
 }

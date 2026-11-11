@@ -4,9 +4,9 @@ FastAPI Web Server for Real-Time Butterfly Pricing Engine Dashboard.
 import os
 import asyncio
 from typing import List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from engine.matrix import PricingMatrix
 from feed.simulator import SimulatorFeed
 from feed.upstox_feed import UpstoxMarketFeed
@@ -15,7 +15,10 @@ from config import upstox_config, engine_config
 app = FastAPI(title="6L butterfly")
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-os.makedirs(STATIC_DIR, exist_ok=True)
+try:
+    os.makedirs(STATIC_DIR, exist_ok=True)
+except Exception:
+    pass
 
 matrix = PricingMatrix(initial_spot=25255.0)
 req = matrix.get_required_strikes()
@@ -69,7 +72,16 @@ def init_feed(prefer_upstox=True, custom_token=None):
         auth_error = None
 
     feed.on_batch(on_batch)
-    feed.start()
+    if hasattr(feed, "generate_all_quotes"):
+        try:
+            initial_quotes = feed.generate_all_quotes()
+            on_batch(initial_quotes)
+        except Exception:
+            pass
+    try:
+        feed.start()
+    except Exception as e:
+        print(f"[Feed] feed.start() error: {e}")
 
 # Active WebSocket connections
 active_connections: List[WebSocket] = []
@@ -83,32 +95,36 @@ def shutdown_event():
     if feed:
         feed.stop()
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def get_index():
-    return FileResponse(
-        os.path.join(STATIC_DIR, "index.html"),
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
-    )
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Index Not Found</h1>", status_code=404)
 
 @app.get("/static/app.js")
 @app.get("/app.js")
 def get_app_js():
-    return FileResponse(
-        os.path.join(STATIC_DIR, "app.js"),
-        media_type="application/javascript",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
-    )
+    js_path = os.path.join(STATIC_DIR, "app.js")
+    if os.path.exists(js_path):
+        with open(js_path, "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="application/javascript")
+    return Response(content="// not found", status_code=404)
 
 @app.get("/static/style.css")
 @app.get("/style.css")
 def get_style_css():
-    return FileResponse(
-        os.path.join(STATIC_DIR, "style.css"),
-        media_type="text/css",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
-    )
+    css_path = os.path.join(STATIC_DIR, "style.css")
+    if os.path.exists(css_path):
+        with open(css_path, "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="text/css")
+    return Response(content="/* not found */", status_code=404)
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+try:
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+except Exception:
+    pass
 
 @app.get("/login")
 def login_redirect():
@@ -256,6 +272,31 @@ def get_strike_swings(strike: float, combo: str = "500/200"):
     if stats:
         return stats.to_dict()
     return {"strike": strike, "combo": combo, "churn_count": 0, "recent_swings": []}
+
+@app.get("/api/matrix-state")
+def get_matrix_state():
+    spot = getattr(feed, "spot", 25255.0)
+    if spot > 0:
+        matrix.set_spot(spot)
+    if feed_mode and "Simulator" in feed_mode and hasattr(feed, "generate_all_quotes"):
+        quotes = feed.generate_all_quotes()
+        on_batch(quotes)
+    all_combos = [c[2] for c in matrix.combos_current] + [c[2] for c in matrix.combos_next]
+    return {
+        "spot": spot,
+        "atm_strike": matrix.atm,
+        "feed_mode": feed_mode,
+        "auth_error": auth_error,
+        "current": matrix.to_table_data("current"),
+        "next": matrix.to_table_data("next"),
+        "combos_current": [c[2] for c in matrix.combos_current],
+        "combos_next": [c[2] for c in matrix.combos_next],
+        "churn_leaderboards": {c: matrix.churn_tracker.get_stats_for_combo(c)[:5] for c in all_combos},
+        "churn_leaderboard": matrix.churn_tracker.get_stats_for_combo("500/200")[:5],
+    }
+
+# Pre-initialize on module load for serverless environments
+init_feed(prefer_upstox=bool(os.getenv("UPSTOX_ACCESS_TOKEN", upstox_config.access_token)))
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

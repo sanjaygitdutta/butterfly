@@ -1,10 +1,12 @@
 import sys
 import os
 
-# Add project root to sys.path so modules like engine, feed, web can be imported
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to sys.path
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 from web.app import app
 
-# Vercel looks for 'app' or handler in api/index.py
-
+# Export both for Vercel WSGI / ASGI runners
+handler = app
