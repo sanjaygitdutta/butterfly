@@ -157,9 +157,17 @@ def login_redirect():
     from fastapi.responses import RedirectResponse
     api_key = os.getenv("UPSTOX_API_KEY", upstox_config.api_key)
     if not api_key:
-        return {"error": "UPSTOX_API_KEY is not set in .env yet. Please save your API Key first."}
-    redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8000/callback")
-    login_url = f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={api_key}&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        return HTMLResponse("<h2 style='color:red'>UPSTOX_API_KEY not set in environment. Add it to Vercel Environment Variables.</h2>")
+    is_vercel = bool(os.getenv("VERCEL"))
+    if is_vercel:
+        # On Vercel, redirect_uri must point to the deployed domain
+        redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "https://butterfly-sooty.vercel.app/callback")
+    else:
+        redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8000/callback")
+    login_url = (
+        f"https://api.upstox.com/v2/login/authorization/dialog"
+        f"?response_type=code&client_id={api_key}&redirect_uri={urllib.parse.quote(redirect_uri)}"
+    )
     return RedirectResponse(url=login_url)
 
 @app.get("/callback")
@@ -167,66 +175,98 @@ def oauth_callback(code: str):
     import urllib.request
     import urllib.parse
     import json
-    from fastapi.responses import HTMLResponse
-    
+
     api_key = os.getenv("UPSTOX_API_KEY", upstox_config.api_key)
     api_secret = os.getenv("UPSTOX_API_SECRET", upstox_config.api_secret)
-    redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8000/callback")
-    
+    is_vercel = bool(os.getenv("VERCEL"))
+    if is_vercel:
+        redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "https://butterfly-sooty.vercel.app/callback")
+    else:
+        redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8000/callback")
+
     token_url = "https://api.upstox.com/v2/login/authorization/token"
     headers = {
         "accept": "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0"
     }
-    data = urllib.parse.urlencode({
+    post_data = urllib.parse.urlencode({
         "code": code,
         "client_id": api_key,
         "client_secret": api_secret,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code"
     }).encode("utf-8")
-    
+
     try:
-        req = urllib.request.Request(token_url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req) as resp:
+        req_obj = urllib.request.Request(token_url, data=post_data, headers=headers, method="POST")
+        with urllib.request.urlopen(req_obj) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             access_token = body.get("access_token", "")
-            
-        if access_token:
-            # Update .env
+
+        if not access_token:
+            return HTMLResponse(f"<h2 style='color:red'>Token exchange failed: {body}</h2>")
+
+        # --- On localhost: save to .env + init live feed immediately ---
+        if not is_vercel:
             env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-            with open(env_file, "w") as f:
-                f.write("# Upstox API v2 Credentials\n")
-                f.write(f"UPSTOX_API_KEY={api_key}\n")
-                f.write(f"UPSTOX_API_SECRET={api_secret}\n")
-                f.write(f"UPSTOX_REDIRECT_URI={redirect_uri}\n")
-                f.write(f"UPSTOX_ACCESS_TOKEN={access_token}\n")
-                
+            try:
+                with open(env_file, "w") as f:
+                    f.write("# Upstox API v2 Credentials\n")
+                    f.write(f"UPSTOX_API_KEY={api_key}\n")
+                    f.write(f"UPSTOX_API_SECRET={api_secret}\n")
+                    f.write(f"UPSTOX_REDIRECT_URI={redirect_uri}\n")
+                    f.write(f"UPSTOX_ACCESS_TOKEN={access_token}\n")
+            except Exception:
+                pass
             os.environ["UPSTOX_ACCESS_TOKEN"] = access_token
             upstox_config.access_token = access_token
             init_feed(prefer_upstox=True, custom_token=access_token)
-                
-            return HTMLResponse("""
-            <html>
-            <body style="font-family: sans-serif; background: #0a0e17; color: #fff; display: flex; align-items: center; justify-content: center; height: 100vh;">
-                <div style="background: #121826; padding: 40px; border-radius: 12px; border: 1px solid #10b981; text-align: center;">
-                    <h2 style="color: #10b981; margin-bottom: 12px;">Upstox Connected Successfully!</h2>
-                    <p style="color: #94a3b8; margin-bottom: 20px;">Live access token generated and activated. Dashboard is now streaming real-time market data!</p>
-                    <a href="/" style="background: #3b82f6; color: #fff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 600;">Return to Dashboard</a>
-                </div>
-            </body>
-            </html>
-            """)
-        else:
-            return {"error": "Failed to extract access_token", "response": body}
+
+        # --- On BOTH localhost + Vercel: save token to browser localStorage ---
+        # The JS snippet stores the token and redirects to dashboard.
+        # On Vercel, every future poll will carry the token as ?token=... param.
+        return HTMLResponse(f"""
+<!DOCTYPE html>
+<html>
+<head><title>6L butterfly - Upstox Connected</title></head>
+<body style="font-family: sans-serif; background: #0a0e17; color: #fff;
+             display: flex; align-items: center; justify-content: center; height: 100vh; margin:0;">
+  <div style="background: #121826; padding: 40px; border-radius: 12px;
+              border: 1px solid #10b981; text-align: center; max-width: 420px;">
+    <h2 style="color: #10b981; margin-bottom: 12px;">Upstox Connected!</h2>
+    <p style="color: #94a3b8; margin-bottom: 8px;">
+      Live access token generated. Saving and redirecting to dashboard...
+    </p>
+    <p id="status" style="color: #38bdf8; font-size: 0.85rem;">Activating live feed...</p>
+  </div>
+  <script>
+    // Save token in browser localStorage so every poll can carry it
+    // Works on both localhost and Vercel (stateless serverless)
+    try {{
+      localStorage.setItem('upstox_access_token', '{access_token}');
+      localStorage.setItem('butterfly_feed_mode', 'live');
+      document.getElementById('status').textContent = 'Token saved. Redirecting...';
+    }} catch(e) {{
+      document.getElementById('status').textContent = 'Could not save to localStorage: ' + e;
+    }}
+    setTimeout(() => {{ window.location.href = '/'; }}, 1500);
+  </script>
+</body>
+</html>
+""")
+
     except Exception as e:
-        return {"error": str(e)}
+        return HTMLResponse(f"<h2 style='color:red'>OAuth error: {e}</h2>")
 
 @app.post("/api/switch-feed")
-def switch_feed(mode: str = "sim"):
+def switch_feed(mode: str = "sim", token: Optional[str] = None):
+    """
+    Switch feed mode. On localhost: persists to memory + .env.
+    On Vercel: stateless — client passes token on each request via ?token=.
+    """
     if mode == "upstox":
-        init_feed(prefer_upstox=True)
+        init_feed(prefer_upstox=True, custom_token=token or None)
     else:
         init_feed(prefer_upstox=False)
     return {"feed_mode": feed_mode, "auth_error": auth_error}
@@ -299,37 +339,75 @@ def get_strike_swings(strike: float, combo: str = "500/200"):
     return {"strike": strike, "combo": combo, "churn_count": 0, "recent_swings": []}
 
 @app.get("/api/matrix-state")
-def get_matrix_state(mode: Optional[str] = None):
+def get_matrix_state(mode: Optional[str] = None, token: Optional[str] = None):
     """
     Returns the current matrix state.
-    Pass ?mode=sim to force simulator data (used by frontend on Vercel where
-    server-side feed state resets on every request).
+
+    Query params (all optional):
+      ?mode=sim      → force simulator (client-side pref stored in localStorage)
+      ?mode=live     → force Upstox live (requires ?token=)
+      ?token=TOKEN   → Upstox access token from browser localStorage
+                       (Vercel is stateless — browser carries the token each request)
     """
     is_vercel = bool(os.getenv("VERCEL"))
 
-    # On Vercel: each Lambda request is fresh — if client requests sim mode,
-    # initialize simulator on the spot for this request
+    # ── Determine effective feed for this request ──────────────────────────
     effective_feed = feed
     effective_feed_mode = feed_mode
-    if is_vercel and mode == "sim" and (not feed or "Simulator" not in feed_mode):
-        try:
-            req = matrix.get_required_strikes()
-            req_strikes = req["current"].union(req["next"])
-            effective_feed = SimulatorFeed(
-                required_strikes=req_strikes,
-                initial_spot=matrix.spot if matrix.spot > 20000 else 25255.0,
-                tick_interval=0.5
-            )
-            effective_feed.on_batch(on_batch)
-            effective_feed_mode = "Simulator"
-        except Exception as e:
-            print(f"[matrix-state] sim init error: {e}")
+    effective_auth_error = auth_error
 
+    if is_vercel:
+        # On Vercel every Lambda is fresh — use the token/mode the browser sends
+        if token and mode != "sim":
+            # Browser has a valid Upstox token → try live fetch
+            try:
+                import upstox_client
+                cfg = upstox_client.Configuration()
+                cfg.access_token = token
+                # Quick profile check to validate token
+                user_api = upstox_client.UserApi(upstox_client.ApiClient(cfg))
+                profile = user_api.get_profile("2.0")
+                user_name = profile.data.user_name if profile and profile.data else "Live"
+
+                req_s = matrix.get_required_strikes()
+                req_strikes = req_s["current"].union(req_s["next"])
+                effective_feed = UpstoxMarketFeed(
+                    access_token=token,
+                    required_strikes=req_strikes,
+                    matrix=matrix
+                )
+                effective_feed.on_batch(on_batch)
+                effective_feed_mode = f"Upstox Live ({user_name})"
+                effective_auth_error = None
+            except Exception as e:
+                err_msg = str(e)
+                effective_auth_error = f"Token invalid or expired: {err_msg[:80]}. Please login again."
+                effective_feed_mode = "Simulator (Token Error)"
+                # Fall through to simulator below
+
+        if not token or mode == "sim" or "Simulator" in effective_feed_mode:
+            # Simulator mode: generate fresh quotes for this request
+            try:
+                req_s = matrix.get_required_strikes()
+                req_strikes = req_s["current"].union(req_s["next"])
+                effective_feed = SimulatorFeed(
+                    required_strikes=req_strikes,
+                    initial_spot=matrix.spot if matrix.spot > 20000 else 25255.0,
+                    tick_interval=0.5
+                )
+                effective_feed.on_batch(on_batch)
+                if mode == "sim":
+                    effective_feed_mode = "Simulator"
+                    effective_auth_error = None
+            except Exception as e:
+                print(f"[matrix-state] sim init error: {e}")
+
+    # ── Generate quotes ────────────────────────────────────────────────────
     spot = getattr(effective_feed, "spot", 25255.0) if effective_feed else 25255.0
     if spot > 0:
         matrix.set_spot(spot)
 
-    if effective_feed and "Simulator" in effective_feed_mode and hasattr(effective_feed, "generate_all_quotes"):
+    if effective_feed and hasattr(effective_feed, "generate_all_quotes"):
         try:
             quotes = effective_feed.generate_all_quotes()
             on_batch(quotes)
@@ -341,7 +419,7 @@ def get_matrix_state(mode: Optional[str] = None):
         "spot": spot,
         "atm_strike": matrix.atm,
         "feed_mode": effective_feed_mode,
-        "auth_error": auth_error,
+        "auth_error": effective_auth_error,
         "current": matrix.to_table_data("current"),
         "next": matrix.to_table_data("next"),
         "combos_current": [c[2] for c in matrix.combos_current],

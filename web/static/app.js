@@ -134,13 +134,29 @@ function startHttpPolling() {
   console.log("WebSocket unavailable, falling back to HTTP polling...");
   const poll = async () => {
     try {
-      // Pass ?mode=sim when user has manually chosen simulator via Switch Mode
-      const modeParam = forcedSimMode ? "?mode=sim" : "";
-      const res = await fetch(`/api/matrix-state${modeParam}`);
+      // Build query params:
+      //   ?mode=sim  → user chose simulator
+      //   ?token=T   → user has a valid Upstox token (from OAuth login → localStorage)
+      const params = new URLSearchParams();
+      const storedToken = localStorage.getItem("upstox_access_token");
+      if (forcedSimMode) {
+        params.set("mode", "sim");
+      } else if (storedToken) {
+        params.set("mode", "live");
+        params.set("token", storedToken);
+      }
+      const qs = params.toString() ? "?" + params.toString() : "";
+      const res = await fetch(`/api/matrix-state${qs}`);
       if (res.ok) {
         const data = await res.json();
         lastData = data;
         updateDashboard(data);
+        // If server says token is invalid/expired, clear it so user gets login prompt
+        if (data.auth_error && data.auth_error.includes("Token invalid")) {
+          localStorage.removeItem("upstox_access_token");
+          localStorage.setItem("butterfly_feed_mode", "sim");
+          forcedSimMode = true;
+        }
       }
     } catch (e) {
       console.warn("Polling error:", e);
@@ -548,50 +564,55 @@ window.addEventListener("keydown", (e) => {
 });
 
 async function toggleFeedMode() {
-  // On Vercel (serverless), each request is a fresh Lambda — there's no persistent global state.
-  // So we store the mode preference in localStorage and pass it as a query param on each poll.
-  forcedSimMode = !forcedSimMode;
-  localStorage.setItem("butterfly_feed_mode", forcedSimMode ? "sim" : "live");
-
-  // Update the button text immediately so the user sees feedback
   const btn = document.getElementById("btn-toggle-feed");
-  if (btn) {
-    btn.textContent = forcedSimMode ? "Switch to Live" : "Switch Mode";
-    btn.style.background = forcedSimMode ? "#2563eb" : "";
-  }
+  const storedToken = localStorage.getItem("upstox_access_token");
+  const currentlyInSim = forcedSimMode || !storedToken;
 
-  // Also try to inform the server (works on localhost; no-op on Vercel stateless)
-  const targetMode = forcedSimMode ? "sim" : "upstox";
-  try {
-    const res = await fetch(`/api/switch-feed?mode=${targetMode}`, { method: "POST" });
-    const result = await res.json();
-    if (result.auth_error && targetMode === "upstox") {
-      alert(result.auth_error);
-      // Revert if upstox failed
-      forcedSimMode = true;
-      localStorage.setItem("butterfly_feed_mode", "sim");
-      if (btn) { btn.textContent = "Switch to Live"; btn.style.background = "#2563eb"; }
+  if (currentlyInSim) {
+    // ── Switching FROM Simulator TO Live ───────────────────────────────
+    if (storedToken) {
+      // We already have a token from a previous login — activate live mode
+      forcedSimMode = false;
+      localStorage.setItem("butterfly_feed_mode", "live");
+      if (btn) { btn.textContent = "Switch to Sim"; btn.style.background = "#10b981"; }
+
+      // Restart polling with token
+      if (httpPollingInterval) { clearInterval(httpPollingInterval); httpPollingInterval = null; }
+      startHttpPolling();
+    } else {
+      // No token → redirect to Upstox OAuth login
+      // After login, Upstox redirects to /callback, which saves token to localStorage
+      // and auto-redirects back to dashboard with live mode active
+      if (btn) { btn.textContent = "Redirecting to Login..."; btn.style.background = "#f59e0b"; }
+      window.location.href = "/login";
     }
-  } catch (err) {
-    // On Vercel, POST may also work per-request — that's fine
-    console.log("Feed switch (stateless ok):", err.message);
-  }
+  } else {
+    // ── Switching FROM Live TO Simulator ───────────────────────────────
+    forcedSimMode = true;
+    localStorage.setItem("butterfly_feed_mode", "sim");
+    if (btn) { btn.textContent = "Switch to Live"; btn.style.background = "#2563eb"; }
 
-  // Restart polling immediately with new mode
-  if (httpPollingInterval) {
-    clearInterval(httpPollingInterval);
-    httpPollingInterval = null;
+    // Restart polling in sim mode
+    if (httpPollingInterval) { clearInterval(httpPollingInterval); httpPollingInterval = null; }
+    startHttpPolling();
   }
-  startHttpPolling();
 }
 
 // Close modals on backdrop click
 window.addEventListener("DOMContentLoaded", () => {
-  // Restore Switch Mode button label from localStorage on page load
+  // Set correct button label on page load based on localStorage state
   const btn = document.getElementById("btn-toggle-feed");
-  if (btn && forcedSimMode) {
-    btn.textContent = "Switch to Live";
-    btn.style.background = "#2563eb";
+  const storedToken = localStorage.getItem("upstox_access_token");
+  if (btn) {
+    if (forcedSimMode || !storedToken) {
+      // Currently in sim, button offers to go live
+      btn.textContent = storedToken ? "Switch to Live" : "Login Upstox (Live)";
+      btn.style.background = "#2563eb";
+    } else {
+      // Currently live, button offers to switch to sim
+      btn.textContent = "Switch to Sim";
+      btn.style.background = "#10b981";
+    }
   }
 
   connectWebSocket();
