@@ -7,6 +7,3 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from web.app import app
-
-# Export both for Vercel WSGI / ASGI runners
-handler = app

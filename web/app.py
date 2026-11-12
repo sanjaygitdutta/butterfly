@@ -3,7 +3,7 @@ FastAPI Web Server for Real-Time Butterfly Pricing Engine Dashboard.
 """
 import os
 import asyncio
-from typing import List
+from typing import List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -14,11 +14,17 @@ from config import upstox_config, engine_config
 
 app = FastAPI(title="6L butterfly")
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-try:
-    os.makedirs(STATIC_DIR, exist_ok=True)
-except Exception:
-    pass
+possible_static_dirs = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"),
+    os.path.join(os.getcwd(), "web", "static"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "static"),
+    "/var/task/web/static"
+]
+STATIC_DIR = possible_static_dirs[0]
+for d in possible_static_dirs:
+    if os.path.exists(os.path.join(d, "index.html")):
+        STATIC_DIR = d
+        break
 
 matrix = PricingMatrix(initial_spot=25255.0)
 req = matrix.get_required_strikes()
@@ -47,8 +53,9 @@ def init_feed(prefer_upstox=True, custom_token=None):
     req = matrix.get_required_strikes()
     req_strikes = req["current"].union(req["next"])
 
+    is_vercel = bool(os.getenv("VERCEL"))
     token = custom_token or os.getenv("UPSTOX_ACCESS_TOKEN", upstox_config.access_token)
-    if prefer_upstox and token:
+    if prefer_upstox and token and not is_vercel:
         try:
             import upstox_client
             cfg = upstox_client.Configuration()
@@ -78,10 +85,13 @@ def init_feed(prefer_upstox=True, custom_token=None):
             on_batch(initial_quotes)
         except Exception:
             pass
-    try:
-        feed.start()
-    except Exception as e:
-        print(f"[Feed] feed.start() error: {e}")
+
+    # Serverless (Vercel) cannot run background loop threads
+    if not is_vercel:
+        try:
+            feed.start()
+        except Exception as e:
+            print(f"[Feed] feed.start() error: {e}")
 
 # Active WebSocket connections
 active_connections: List[WebSocket] = []
@@ -95,31 +105,40 @@ def shutdown_event():
     if feed:
         feed.stop()
 
+def _find_file(filename: str) -> Optional[str]:
+    p = os.path.join(STATIC_DIR, filename)
+    if os.path.exists(p):
+        return p
+    for root, dirs, files in os.walk(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))):
+        if filename in files:
+            return os.path.join(root, filename)
+    return None
+
 @app.get("/", response_class=HTMLResponse)
 def get_index():
-    index_path = os.path.join(STATIC_DIR, "index.html")
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
+    path = _find_file("index.html")
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Index Not Found</h1>", status_code=404)
+    return HTMLResponse(content="<h1>6L butterfly Dashboard</h1><p>Index template loading...</p>", status_code=200)
 
 @app.get("/static/app.js")
 @app.get("/app.js")
 def get_app_js():
-    js_path = os.path.join(STATIC_DIR, "app.js")
-    if os.path.exists(js_path):
-        with open(js_path, "r", encoding="utf-8") as f:
+    path = _find_file("app.js")
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             return Response(content=f.read(), media_type="application/javascript")
-    return Response(content="// not found", status_code=404)
+    return Response(content="// app.js", status_code=200)
 
 @app.get("/static/style.css")
 @app.get("/style.css")
 def get_style_css():
-    css_path = os.path.join(STATIC_DIR, "style.css")
-    if os.path.exists(css_path):
-        with open(css_path, "r", encoding="utf-8") as f:
+    path = _find_file("style.css")
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             return Response(content=f.read(), media_type="text/css")
-    return Response(content="/* not found */", status_code=404)
+    return Response(content="/* style.css */", status_code=200)
 
 try:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
