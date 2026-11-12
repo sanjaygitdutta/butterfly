@@ -6,8 +6,12 @@ Maps NIFTY option contracts directly via Upstox OptionsApi.
 import os
 import threading
 from typing import Dict, List, Set, Tuple, Optional, Any
-import upstox_client
-from upstox_client.feeder import MarketDataStreamerV3
+try:
+    import upstox_client
+    from upstox_client.feeder import MarketDataStreamerV3
+except Exception as _e:
+    upstox_client = None
+    MarketDataStreamerV3 = None
 from .base import BaseMarketFeed
 from engine.combo import OptionQuote
 from config import upstox_config
