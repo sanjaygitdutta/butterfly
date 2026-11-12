@@ -315,7 +315,10 @@ def get_matrix_state():
     }
 
 # Pre-initialize on module load for serverless environments
-init_feed(prefer_upstox=bool(os.getenv("UPSTOX_ACCESS_TOKEN", upstox_config.access_token)))
+try:
+    init_feed(prefer_upstox=bool(os.getenv("UPSTOX_ACCESS_TOKEN", upstox_config.access_token)))
+except Exception as e:
+    print(f"Error in module-level init_feed: {e}")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
