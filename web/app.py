@@ -299,18 +299,48 @@ def get_strike_swings(strike: float, combo: str = "500/200"):
     return {"strike": strike, "combo": combo, "churn_count": 0, "recent_swings": []}
 
 @app.get("/api/matrix-state")
-def get_matrix_state():
-    spot = getattr(feed, "spot", 25255.0)
+def get_matrix_state(mode: Optional[str] = None):
+    """
+    Returns the current matrix state.
+    Pass ?mode=sim to force simulator data (used by frontend on Vercel where
+    server-side feed state resets on every request).
+    """
+    is_vercel = bool(os.getenv("VERCEL"))
+
+    # On Vercel: each Lambda request is fresh — if client requests sim mode,
+    # initialize simulator on the spot for this request
+    effective_feed = feed
+    effective_feed_mode = feed_mode
+    if is_vercel and mode == "sim" and (not feed or "Simulator" not in feed_mode):
+        try:
+            req = matrix.get_required_strikes()
+            req_strikes = req["current"].union(req["next"])
+            effective_feed = SimulatorFeed(
+                required_strikes=req_strikes,
+                initial_spot=matrix.spot if matrix.spot > 20000 else 25255.0,
+                tick_interval=0.5
+            )
+            effective_feed.on_batch(on_batch)
+            effective_feed_mode = "Simulator"
+        except Exception as e:
+            print(f"[matrix-state] sim init error: {e}")
+
+    spot = getattr(effective_feed, "spot", 25255.0) if effective_feed else 25255.0
     if spot > 0:
         matrix.set_spot(spot)
-    if feed_mode and "Simulator" in feed_mode and hasattr(feed, "generate_all_quotes"):
-        quotes = feed.generate_all_quotes()
-        on_batch(quotes)
+
+    if effective_feed and "Simulator" in effective_feed_mode and hasattr(effective_feed, "generate_all_quotes"):
+        try:
+            quotes = effective_feed.generate_all_quotes()
+            on_batch(quotes)
+        except Exception:
+            pass
+
     all_combos = [c[2] for c in matrix.combos_current] + [c[2] for c in matrix.combos_next]
     return {
         "spot": spot,
         "atm_strike": matrix.atm,
-        "feed_mode": feed_mode,
+        "feed_mode": effective_feed_mode,
         "auth_error": auth_error,
         "current": matrix.to_table_data("current"),
         "next": matrix.to_table_data("next"),

@@ -6,6 +6,10 @@ let selectedChurnCombo = "500/200";
 let lastHeaderTab = null;
 let lastHeaderCombosKey = "";
 
+// Feed mode preference: stored in localStorage so it survives page reloads
+// and works on stateless serverless (Vercel) where server-side state resets each request.
+let forcedSimMode = localStorage.getItem("butterfly_feed_mode") === "sim";
+
 function changeChurnCombo(combo) {
   if (!combo) return;
   selectedChurnCombo = combo;
@@ -130,7 +134,9 @@ function startHttpPolling() {
   console.log("WebSocket unavailable, falling back to HTTP polling...");
   const poll = async () => {
     try {
-      const res = await fetch("/api/matrix-state");
+      // Pass ?mode=sim when user has manually chosen simulator via Switch Mode
+      const modeParam = forcedSimMode ? "?mode=sim" : "";
+      const res = await fetch(`/api/matrix-state${modeParam}`);
       if (res.ok) {
         const data = await res.json();
         lastData = data;
@@ -542,21 +548,52 @@ window.addEventListener("keydown", (e) => {
 });
 
 async function toggleFeedMode() {
-  const currentIsUpstox = lastData && lastData.feed_mode && lastData.feed_mode.includes("Upstox Live");
-  const targetMode = currentIsUpstox ? "sim" : "upstox";
+  // On Vercel (serverless), each request is a fresh Lambda — there's no persistent global state.
+  // So we store the mode preference in localStorage and pass it as a query param on each poll.
+  forcedSimMode = !forcedSimMode;
+  localStorage.setItem("butterfly_feed_mode", forcedSimMode ? "sim" : "live");
+
+  // Update the button text immediately so the user sees feedback
+  const btn = document.getElementById("btn-toggle-feed");
+  if (btn) {
+    btn.textContent = forcedSimMode ? "Switch to Live" : "Switch Mode";
+    btn.style.background = forcedSimMode ? "#2563eb" : "";
+  }
+
+  // Also try to inform the server (works on localhost; no-op on Vercel stateless)
+  const targetMode = forcedSimMode ? "sim" : "upstox";
   try {
     const res = await fetch(`/api/switch-feed?mode=${targetMode}`, { method: "POST" });
     const result = await res.json();
     if (result.auth_error && targetMode === "upstox") {
       alert(result.auth_error);
+      // Revert if upstox failed
+      forcedSimMode = true;
+      localStorage.setItem("butterfly_feed_mode", "sim");
+      if (btn) { btn.textContent = "Switch to Live"; btn.style.background = "#2563eb"; }
     }
   } catch (err) {
-    console.error("Failed to toggle feed mode:", err);
+    // On Vercel, POST may also work per-request — that's fine
+    console.log("Feed switch (stateless ok):", err.message);
   }
+
+  // Restart polling immediately with new mode
+  if (httpPollingInterval) {
+    clearInterval(httpPollingInterval);
+    httpPollingInterval = null;
+  }
+  startHttpPolling();
 }
 
 // Close modals on backdrop click
 window.addEventListener("DOMContentLoaded", () => {
+  // Restore Switch Mode button label from localStorage on page load
+  const btn = document.getElementById("btn-toggle-feed");
+  if (btn && forcedSimMode) {
+    btn.textContent = "Switch to Live";
+    btn.style.background = "#2563eb";
+  }
+
   connectWebSocket();
   
   const stratModal = document.getElementById("strategy-modal");
