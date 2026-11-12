@@ -164,10 +164,12 @@ def login_redirect():
         redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "https://butterfly-sooty.vercel.app/callback")
     else:
         redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "http://localhost:8000/callback")
-    login_url = (
-        f"https://api.upstox.com/v2/login/authorization/dialog"
-        f"?response_type=code&client_id={api_key}&redirect_uri={urllib.parse.quote(redirect_uri)}"
-    )
+    params = {
+        "response_type": "code",
+        "client_id": api_key,
+        "redirect_uri": redirect_uri
+    }
+    login_url = f"https://api.upstox.com/v2/login/authorization/dialog?{urllib.parse.urlencode(params)}"
     return RedirectResponse(url=login_url)
 
 @app.get("/callback")
@@ -377,6 +379,11 @@ def get_matrix_state(mode: Optional[str] = None, token: Optional[str] = None):
                     matrix=matrix
                 )
                 effective_feed.on_batch(on_batch)
+                # Fetch real option chain prices and spot via REST snapshot (works in serverless Lambda)
+                real_quotes = effective_feed.fetch_quotes_snapshot()
+                if real_quotes:
+                    on_batch(real_quotes)
+
                 effective_feed_mode = f"Upstox Live ({user_name})"
                 effective_auth_error = None
             except Exception as e:

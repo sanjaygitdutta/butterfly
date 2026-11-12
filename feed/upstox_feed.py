@@ -100,6 +100,111 @@ class UpstoxMarketFeed(BaseMarketFeed):
         except Exception as e:
             print(f"[Upstox Feed Error] Failed to fetch contracts: {e}")
 
+    def fetch_quotes_snapshot(self) -> List[OptionQuote]:
+        """
+        Fetches live or closing option quotes via Upstox REST API.
+        Designed for serverless Lambda environments (Vercel) without persistent WebSockets.
+        """
+        if not self.access_token:
+            return []
+
+        if not self.instrument_map:
+            self.fetch_and_map_instruments()
+
+        if not self.instrument_map:
+            return []
+
+        configuration = upstox_client.Configuration()
+        configuration.access_token = self.access_token
+        api_client = upstox_client.ApiClient(configuration)
+        quote_api = upstox_client.MarketQuoteApi(api_client)
+
+        # 1. Update spot
+        try:
+            ltp_res = quote_api.ltp(symbol="NSE_INDEX|Nifty 50", api_version="2.0")
+            if ltp_res and ltp_res.data:
+                for k, v in ltp_res.data.items():
+                    if hasattr(v, "last_price"):
+                        self.spot = float(v.last_price)
+            if self.matrix:
+                self.matrix.set_spot(self.spot)
+        except Exception as e:
+            print(f"[Upstox REST] spot fetch error: {e}")
+
+        # 2. Collect required instrument keys
+        keys_to_fetch = set()
+        req_strikes = self.required_strikes
+        if not req_strikes and self.matrix:
+            req = self.matrix.get_required_strikes()
+            req_strikes = req["current"].union(req["next"])
+
+        for strike, opt_type in req_strikes:
+            for tag in ["current", "nxt"]:
+                key = self.strike_to_instrument.get((tag, strike, opt_type))
+                if key:
+                    keys_to_fetch.add(key)
+
+        if not keys_to_fetch:
+            keys_to_fetch = set(list(self.instrument_map.keys())[:150])
+
+        keys_list = list(keys_to_fetch)
+        quotes_list: List[OptionQuote] = []
+
+        chunk_size = 100
+        for i in range(0, len(keys_list), chunk_size):
+            chunk = keys_list[i:i + chunk_size]
+            symbols_param = ",".join(chunk)
+            try:
+                res = quote_api.get_full_market_quote(symbol=symbols_param, api_version="2.0")
+                if not res or not res.data:
+                    continue
+
+                for inst_key, q_data in res.data.items():
+                    normalized_key = inst_key.replace(":", "|")
+                    mapped_info = self.instrument_map.get(inst_key) or self.instrument_map.get(normalized_key)
+                    if not mapped_info:
+                        for k, v in self.instrument_map.items():
+                            if k.endswith(inst_key) or inst_key.endswith(k):
+                                mapped_info = v
+                                break
+                    if not mapped_info:
+                        continue
+
+                    strike, opt_type, exp_tag = mapped_info
+                    ltp = float(getattr(q_data, "last_price", 0.0) or 0.0)
+                    bid = 0.0
+                    ask = 0.0
+                    depth = getattr(q_data, "depth", None)
+                    if depth:
+                        buy_list = getattr(depth, "buy", None) or []
+                        sell_list = getattr(depth, "sell", None) or []
+                        if buy_list and len(buy_list) > 0:
+                            bid = float(getattr(buy_list[0], "price", 0.0) or 0.0)
+                        if sell_list and len(sell_list) > 0:
+                            ask = float(getattr(sell_list[0], "price", 0.0) or 0.0)
+
+                    # When market is closed (post 3:30 PM), order depth is 0.0.
+                    # Use closing LTP with narrow spread so metrics compute accurately.
+                    if (bid == 0.0 or ask == 0.0) and ltp > 0.0:
+                        bid = round(max(0.05, ltp - 0.25), 2)
+                        ask = round(ltp + 0.25, 2)
+
+                    quotes_list.append(OptionQuote(
+                        strike=strike,
+                        option_type=opt_type,
+                        bid=bid,
+                        ask=ask,
+                        ltp=ltp,
+                        expiry=exp_tag
+                    ))
+            except Exception as e:
+                print(f"[Upstox REST] quotes chunk error: {e}")
+
+        if quotes_list:
+            self._dispatch_batch(quotes_list)
+
+        return quotes_list
+
     def start(self):
         if not self.access_token:
             raise ValueError("Upstox access_token is missing! Set UPSTOX_ACCESS_TOKEN in .env.")
