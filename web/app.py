@@ -114,7 +114,13 @@ def _find_file(filename: str) -> Optional[str]:
             return os.path.join(root, filename)
     return None
 
+@app.get("/favicon.ico")
+def get_favicon():
+    return Response(content=b"", media_type="image/x-icon", status_code=200)
+
 @app.get("/", response_class=HTMLResponse)
+@app.get("/api/index", response_class=HTMLResponse)
+@app.get("/api", response_class=HTMLResponse)
 def get_index():
     path = _find_file("index.html")
     if path and os.path.exists(path):
@@ -314,11 +320,15 @@ def get_matrix_state():
         "churn_leaderboard": matrix.churn_tracker.get_stats_for_combo("500/200")[:5],
     }
 
-# Pre-initialize on module load for serverless environments
-try:
-    init_feed(prefer_upstox=bool(os.getenv("UPSTOX_ACCESS_TOKEN", upstox_config.access_token)))
-except Exception as e:
-    print(f"Error in module-level init_feed: {e}")
+# Pre-initialize on module load — only for serverless (Vercel) with simulator
+# For local dev, startup_event() handles this via uvicorn lifecycle
+_is_vercel = bool(os.getenv("VERCEL"))
+if _is_vercel:
+    try:
+        # On Vercel: always use Simulator (no live broker feed possible)
+        init_feed(prefer_upstox=False)
+    except Exception as _e:
+        print(f"[Vercel startup] init_feed error (non-fatal): {_e}")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
