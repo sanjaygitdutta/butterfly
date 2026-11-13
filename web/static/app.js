@@ -566,12 +566,13 @@ window.addEventListener("keydown", (e) => {
 async function toggleFeedMode() {
   const btn = document.getElementById("btn-toggle-feed");
   const storedToken = localStorage.getItem("upstox_access_token");
-  const currentlyInSim = forcedSimMode || !storedToken;
+  const hasAuthError = lastData && lastData.auth_error;
+  const currentlyInSim = forcedSimMode || !storedToken || !!hasAuthError;
 
   if (currentlyInSim) {
     // ── Switching FROM Simulator TO Live ───────────────────────────────
-    if (storedToken) {
-      // We already have a token from a previous login — activate live mode
+    if (storedToken && !hasAuthError) {
+      // Valid token present — activate live mode
       forcedSimMode = false;
       localStorage.setItem("butterfly_feed_mode", "live");
       if (btn) { btn.textContent = "Switch to Sim"; btn.style.background = "#10b981"; }
@@ -580,9 +581,7 @@ async function toggleFeedMode() {
       if (httpPollingInterval) { clearInterval(httpPollingInterval); httpPollingInterval = null; }
       startHttpPolling();
     } else {
-      // No token → redirect to Upstox OAuth login
-      // After login, Upstox redirects to /callback, which saves token to localStorage
-      // and auto-redirects back to dashboard with live mode active
+      // Token missing or expired today → redirect to Upstox OAuth login
       if (btn) { btn.textContent = "Redirecting to Login..."; btn.style.background = "#f59e0b"; }
       window.location.href = "/login";
     }
@@ -597,6 +596,17 @@ async function toggleFeedMode() {
     startHttpPolling();
   }
 }
+
+// React instantly when user logs into Upstox in another tab
+window.addEventListener("storage", (e) => {
+  if (e.key === "upstox_access_token" && e.newValue) {
+    forcedSimMode = false;
+    const btn = document.getElementById("btn-toggle-feed");
+    if (btn) { btn.textContent = "Switch to Sim"; btn.style.background = "#10b981"; }
+    if (httpPollingInterval) { clearInterval(httpPollingInterval); httpPollingInterval = null; }
+    startHttpPolling();
+  }
+});
 
 // Close modals on backdrop click
 window.addEventListener("DOMContentLoaded", () => {

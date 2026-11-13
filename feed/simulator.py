@@ -35,7 +35,7 @@ class SimulatorFeed(BaseMarketFeed):
     def __init__(
         self,
         required_strikes: Set[Tuple[float, str]],
-        initial_spot: float = 23135.4,
+        initial_spot: float = 25299.0,
         tick_interval: float = 0.5
     ):
         super().__init__()

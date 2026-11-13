@@ -16,6 +16,13 @@ from .base import BaseMarketFeed
 from engine.combo import OptionQuote
 from config import upstox_config
 
+def _extract_val(obj, key, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 class UpstoxMarketFeed(BaseMarketFeed):
     def __init__(
         self,
@@ -32,8 +39,8 @@ class UpstoxMarketFeed(BaseMarketFeed):
         self.target_expiry = target_expiry
         self.matrix = matrix
         
-        # Spot price tracking
-        self.spot: float = 25255.0
+        # Spot price tracking (default to 25299.0)
+        self.spot: float = 25299.0
         
         # Mapping: instrument_key -> (strike, option_type, expiry_tag)
         self.instrument_map: Dict[str, Tuple[float, str, str]] = {}
@@ -59,10 +66,13 @@ class UpstoxMarketFeed(BaseMarketFeed):
             quote_api = upstox_client.MarketQuoteApi(api_client)
             ltp_res = quote_api.ltp(symbol="NSE_INDEX|Nifty 50", api_version="2.0")
             if ltp_res and ltp_res.data:
-                for k, v in ltp_res.data.items():
-                    if hasattr(v, "last_price"):
-                        self.spot = float(v.last_price)
+                data_dict = ltp_res.data if isinstance(ltp_res.data, dict) else (ltp_res.data.to_dict() if hasattr(ltp_res.data, "to_dict") else {})
+                for k, v in data_dict.items():
+                    price = _extract_val(v, "last_price")
+                    if price and float(price) > 0:
+                        self.spot = float(price)
                         print(f"[Upstox Feed] Live NIFTY Spot: {self.spot}")
+                        break
 
             if self.matrix:
                 self.matrix.set_spot(self.spot)
@@ -123,9 +133,12 @@ class UpstoxMarketFeed(BaseMarketFeed):
         try:
             ltp_res = quote_api.ltp(symbol="NSE_INDEX|Nifty 50", api_version="2.0")
             if ltp_res and ltp_res.data:
-                for k, v in ltp_res.data.items():
-                    if hasattr(v, "last_price"):
-                        self.spot = float(v.last_price)
+                data_dict = ltp_res.data if isinstance(ltp_res.data, dict) else (ltp_res.data.to_dict() if hasattr(ltp_res.data, "to_dict") else {})
+                for k, v in data_dict.items():
+                    price = _extract_val(v, "last_price")
+                    if price and float(price) > 0:
+                        self.spot = float(price)
+                        break
             if self.matrix:
                 self.matrix.set_spot(self.spot)
         except Exception as e:
@@ -159,7 +172,8 @@ class UpstoxMarketFeed(BaseMarketFeed):
                 if not res or not res.data:
                     continue
 
-                for inst_key, q_data in res.data.items():
+                data_dict = res.data if isinstance(res.data, dict) else (res.data.to_dict() if hasattr(res.data, "to_dict") else {})
+                for inst_key, q_data in data_dict.items():
                     normalized_key = inst_key.replace(":", "|")
                     mapped_info = self.instrument_map.get(inst_key) or self.instrument_map.get(normalized_key)
                     if not mapped_info:
@@ -171,17 +185,17 @@ class UpstoxMarketFeed(BaseMarketFeed):
                         continue
 
                     strike, opt_type, exp_tag = mapped_info
-                    ltp = float(getattr(q_data, "last_price", 0.0) or 0.0)
+                    ltp = float(_extract_val(q_data, "last_price", 0.0) or 0.0)
                     bid = 0.0
                     ask = 0.0
-                    depth = getattr(q_data, "depth", None)
+                    depth = _extract_val(q_data, "depth", None)
                     if depth:
-                        buy_list = getattr(depth, "buy", None) or []
-                        sell_list = getattr(depth, "sell", None) or []
+                        buy_list = _extract_val(depth, "buy", []) or []
+                        sell_list = _extract_val(depth, "sell", []) or []
                         if buy_list and len(buy_list) > 0:
-                            bid = float(getattr(buy_list[0], "price", 0.0) or 0.0)
+                            bid = float(_extract_val(buy_list[0], "price", 0.0) or 0.0)
                         if sell_list and len(sell_list) > 0:
-                            ask = float(getattr(sell_list[0], "price", 0.0) or 0.0)
+                            ask = float(_extract_val(sell_list[0], "price", 0.0) or 0.0)
 
                     # When market is closed (post 3:30 PM), order depth is 0.0.
                     # Use closing LTP with narrow spread so metrics compute accurately.

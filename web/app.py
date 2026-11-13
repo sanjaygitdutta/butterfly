@@ -26,7 +26,7 @@ for d in possible_static_dirs:
         STATIC_DIR = d
         break
 
-matrix = PricingMatrix(initial_spot=25255.0)
+matrix = PricingMatrix(initial_spot=25299.0)
 req = matrix.get_required_strikes()
 required_strikes = req["current"].union(req["next"])
 
@@ -49,7 +49,7 @@ def init_feed(prefer_upstox=True, custom_token=None):
         except Exception:
             pass
 
-    current_spot = matrix.spot if matrix.spot > 20000 else 25255.0
+    current_spot = matrix.spot if matrix.spot > 20000 else 25299.0
     req = matrix.get_required_strikes()
     req_strikes = req["current"].union(req["next"])
 
@@ -399,7 +399,7 @@ def get_matrix_state(mode: Optional[str] = None, token: Optional[str] = None):
                 req_strikes = req_s["current"].union(req_s["next"])
                 effective_feed = SimulatorFeed(
                     required_strikes=req_strikes,
-                    initial_spot=matrix.spot if matrix.spot > 20000 else 25255.0,
+                    initial_spot=matrix.spot if matrix.spot > 20000 else 25299.0,
                     tick_interval=0.5
                 )
                 effective_feed.on_batch(on_batch)
@@ -410,7 +410,7 @@ def get_matrix_state(mode: Optional[str] = None, token: Optional[str] = None):
                 print(f"[matrix-state] sim init error: {e}")
 
     # ── Generate quotes ────────────────────────────────────────────────────
-    spot = getattr(effective_feed, "spot", 25255.0) if effective_feed else 25255.0
+    spot = getattr(effective_feed, "spot", 25299.0) if effective_feed else 25299.0
     if spot > 0:
         matrix.set_spot(spot)
 
